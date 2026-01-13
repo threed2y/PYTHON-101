@@ -1,19 +1,16 @@
 n = int(input())
-s = ""
-
+checksum = 0
 for i in range(n):
-    s += input()
-
-    s = s.strip()
-    a = 0
-    for i in s:
-        if i == "(":
-            a += 1
-
+    bracket = list(str(input().split()))
+    for seq in bracket:
+        if seq == ")":
+            bracket_new = bracket.remove(")")
+            checksum += 1
         else:
-            a -= 1
-
-    if a == 0:
+            bracket_new = bracket.remove("(")
+            checksum -= 1
+            break
+    if checksum == 0 and checksum < 0:
         print("yes")
     else:
         print("no")
