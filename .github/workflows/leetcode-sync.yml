@@ -1,0 +1,60 @@
+name: LeetCode Sync
+
+# This workflow assumes the sync tool lives in a `sync/` folder inside the
+# SAME repo you want solutions committed to (see README "GitHub Actions setup").
+# That lets it use the run's built-in GITHUB_TOKEN instead of a personal PAT.
+
+on:
+  schedule:
+    # Every 15 minutes. GitHub does not guarantee exact timing for schedule
+    # triggers (low-traffic repos can see delays of several minutes to ~1hr),
+    # so this is "near real-time", not truly instant like a persistent poller.
+    - cron: "*/15 * * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+# Prevents two runs from racing on sync_state.json if one is still finishing.
+concurrency:
+  group: leetcode-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: sync/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r sync/requirements.txt
+
+      - name: Run sync (single pass)
+        env:
+          LEETCODE_SESSION: ${{ secrets.LEETCODE_SESSION }}
+          LEETCODE_CSRF_TOKEN: ${{ secrets.LEETCODE_CSRF_TOKEN }}
+          LEETCODE_USERNAME: ${{ secrets.LEETCODE_USERNAME }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python sync/main.py --once
+
+      - name: Persist sync state
+        run: |
+          git config user.name "leetcode-sync-bot"
+          git config user.email "actions@users.noreply.github.com"
+          if ! git diff --quiet -- sync/sync_state.json; then
+            git add sync/sync_state.json
+            git commit -m "chore: update sync state"
+            git push
+          else
+            echo "No state changes to commit."
+          fi
