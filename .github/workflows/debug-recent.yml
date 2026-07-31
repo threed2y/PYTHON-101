@@ -1,0 +1,27 @@
+name: Debug - Recent Submissions
+
+# Manual-only diagnostic. Run this from the Actions tab, then check the
+# "Dump recent accepted submissions" step's log output for the raw JSON.
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  debug:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r sync/requirements.txt
+
+      - name: Dump recent accepted submissions
+        env:
+          LEETCODE_SESSION: ${{ secrets.LEETCODE_SESSION }}
+          LEETCODE_CSRF_TOKEN: ${{ secrets.LEETCODE_CSRF_TOKEN }}
+          LEETCODE_USERNAME: ${{ secrets.LEETCODE_USERNAME }}
+        run: python sync/check_recent.py
