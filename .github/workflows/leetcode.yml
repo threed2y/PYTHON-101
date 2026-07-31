@@ -20,5 +20,6 @@ jobs:
           leetcode-session: ${{ secrets.LEETCODE_SESSION }}
           leetcode-csrf-token: ${{ secrets.LEETCODE_CSRF_TOKEN }}
 
+          destination-folder: LeetCode
           verbose: true
           commit-header: "[LeetCode]"
