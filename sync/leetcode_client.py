@@ -127,6 +127,30 @@ class LeetCodeClient:
         data = self._post(SUBMISSION_DETAILS_QUERY, {"submissionId": int(submission_id)})
         return data.get("submissionDetails", {}) or {}
 
+    def get_submission_details_with_code(self, submission_id: int, max_attempts: int = 4,
+                                          base_delay: float = 3.0) -> dict[str, Any]:
+        """Like get_submission_details, but retries with backoff if `code`
+        comes back empty. LeetCode's write path (especially for database/SQL
+        submissions) can lag behind recentAcSubmissionList by a few seconds,
+        so an immediate query sometimes returns every field except code.
+        Returns whatever the last attempt got, even if still empty — the
+        caller decides what to do with that.
+        """
+        details: dict[str, Any] = {}
+        for attempt in range(1, max_attempts + 1):
+            details = self.get_submission_details(submission_id)
+            if details.get("code"):
+                return details
+            if attempt < max_attempts:
+                delay = base_delay * attempt
+                logger.warning(
+                    "submissionDetails for %s returned no code (attempt %d/%d). "
+                    "Retrying in %.0fs — this is usually just replication lag.",
+                    submission_id, attempt, max_attempts, delay,
+                )
+                time.sleep(delay)
+        return details
+
     def get_question_data(self, title_slug: str) -> dict[str, Any]:
         data = self._post(QUESTION_DATA_QUERY, {"titleSlug": title_slug})
         return data.get("question", {}) or {}
