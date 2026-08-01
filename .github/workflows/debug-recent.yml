@@ -32,3 +32,10 @@ jobs:
           LEETCODE_CSRF_TOKEN: ${{ secrets.LEETCODE_CSRF_TOKEN }}
           LEETCODE_USERNAME: ${{ secrets.LEETCODE_USERNAME }}
         run: python tools/check_profile.py
+      
+      - name: Check submission code
+        env:
+          LEETCODE_SESSION: ${{ secrets.LEETCODE_SESSION }}
+          LEETCODE_CSRF_TOKEN: ${{ secrets.LEETCODE_CSRF_TOKEN }}
+          LEETCODE_USERNAME: ${{ secrets.LEETCODE_USERNAME }}
+        run: python tools/check_submission_code.py <submission_id>
