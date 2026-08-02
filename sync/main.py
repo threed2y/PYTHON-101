@@ -1,20 +1,18 @@
 """
-Entry point: polls LeetCode for newly-accepted submissions and syncs each one
-to GitHub as soon as it's detected, then keeps the stats README current.
+Entry point: single-pass sync run, designed to be invoked by the GitHub
+Actions workflow on a schedule. There is no loop mode anymore — Actions
+provides the scheduling.
 
-Submissions whose code isn't available yet (LeetCode replication lag, seen
-most often on database/SQL problems) are never committed empty — they're
-tracked as "pending" and retried automatically on the next poll, with no
-manual intervention needed.
+Exit code 0: pass completed (whether or not anything new was synced).
+Exit code 1: an unrecoverable error occurred (expired auth, GitHub
+             permission problem, etc.) — the workflow run will show failed,
+             which is intentional: failures should be visible, not silent.
 
 Run:
-    python main.py            # loop forever at the configured interval
-    python main.py --once      # single pass, useful for cron/GitHub Actions
+    python sync/main.py
 """
-import argparse
 import logging
 import sys
-import time
 from pathlib import Path
 from typing import Any
 
@@ -23,9 +21,8 @@ from github_sync import GitHubSync
 from leetcode_client import LeetCodeClient
 from state import SyncState
 
-# Log dir is relative to this file, not the caller's cwd, so it behaves the
-# same whether you run `python main.py` here or `python sync/main.py` from a
-# repo root (as the GitHub Actions workflow does).
+import time
+
 LOG_DIR = Path(__file__).parent / "logs"
 LOG_DIR.mkdir(exist_ok=True)
 
@@ -36,15 +33,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger("leetcode_sync.main")
 
-# After this many consecutive failed poll-cycle attempts for one submission,
-# log at ERROR (not just WARNING) so it's impossible to miss in the logs —
-# but keep retrying regardless, since it usually still resolves eventually.
-PENDING_ESCALATE_THRESHOLD = 5
 
-
-def _attempt_sync(lc: LeetCodeClient, gh: GitHubSync, state: SyncState, sub: dict[str, Any]) -> bool:
+def _attempt_sync(lc: LeetCodeClient, gh: GitHubSync, state: SyncState, sub: dict[str, Any],
+                   escalate_threshold: int) -> bool:
     """Tries to fully sync one submission. Returns True if committed, False
-    if code still isn't available from LeetCode yet (will retry next poll).
+    if code still isn't available from LeetCode yet (will retry next run).
     Lets unexpected errors (network, GitHub API, etc.) propagate to the caller."""
     details = lc.get_submission_details_with_code(sub["id"])
 
@@ -55,16 +48,16 @@ def _attempt_sync(lc: LeetCodeClient, gh: GitHubSync, state: SyncState, sub: dic
             "lang": sub["lang"],
             "timestamp": sub["timestamp"],
         })
-        if attempts >= PENDING_ESCALATE_THRESHOLD:
+        if attempts >= escalate_threshold:
             logger.error(
-                "Submission %s (%s) still has no code after %d poll-cycle attempts. "
-                "Still retrying automatically, but this is unusual — inspect with "
-                "`python tools/check_submission_code.py %s` if it keeps failing.",
-                sub["id"], sub["title"], attempts, sub["id"],
+                "Submission %s (%s) still has no code after %d run(s). Still retrying "
+                "automatically, but this is unusual — inspect with the 'Debug submission code' "
+                "option in the maintenance workflow if it keeps failing.",
+                sub["id"], sub["title"], attempts,
             )
         else:
             logger.warning(
-                "Submission %s (%s) has no code yet (attempt %d) — will retry next poll.",
+                "Submission %s (%s) has no code yet (attempt %d) — will retry next run.",
                 sub["id"], sub["title"], attempts,
             )
         return False
@@ -73,12 +66,11 @@ def _attempt_sync(lc: LeetCodeClient, gh: GitHubSync, state: SyncState, sub: dic
     ext = lc.extension_for_lang(sub["lang"])
     gh.sync_solution(sub, details, question, ext)
     state.mark_synced(
-        sub["id"],
+        sub["id"], sub["titleSlug"],
         {
-            "problem_id": question.get("questionFrontendId", "0"),
+            "problem_id": question.get("questionFrontendId") or "0",
             "title": sub["title"],
-            "slug": sub["titleSlug"],
-            "difficulty": question.get("difficulty", "Unknown"),
+            "difficulty": question.get("difficulty") or "Unknown",
             "lang": sub["lang"],
             "timestamp": sub["timestamp"],
         },
@@ -87,18 +79,19 @@ def _attempt_sync(lc: LeetCodeClient, gh: GitHubSync, state: SyncState, sub: dic
     return True
 
 
-def run_once(lc: LeetCodeClient, gh: GitHubSync, state: SyncState, fetch_limit: int) -> int:
+def run_once(lc: LeetCodeClient, gh: GitHubSync, state: SyncState, fetch_limit: int,
+             commit_delay: float, escalate_threshold: int) -> int:
     """Checks for new + previously-pending submissions and syncs them. Returns count synced."""
     submissions = lc.get_recent_ac_submissions(limit=fetch_limit)
     seen_ids = {str(s["id"]) for s in submissions}
 
-    candidates = [s for s in submissions if not state.is_synced(s["id"])]
+    candidates = [s for s in submissions if not state.is_handled(s["id"])]
 
     # Pending submissions that have since fallen out of the recent-submissions
-    # window (e.g. you solved 20+ more problems since) still get retried,
-    # using the metadata captured the first time they were seen.
+    # window still get retried, using metadata captured the first time they
+    # were seen — so a long gap between runs doesn't silently drop them.
     for sub_id, rec in state.all_pending().items():
-        if sub_id in seen_ids or state.is_synced(sub_id):
+        if sub_id in seen_ids or state.is_handled(sub_id):
             continue
         candidates.append({
             "id": sub_id,
@@ -113,47 +106,57 @@ def run_once(lc: LeetCodeClient, gh: GitHubSync, state: SyncState, fetch_limit: 
         return 0
 
     # Oldest first, so commit history reads chronologically.
-    candidates.sort(key=lambda s: int(s.get("timestamp", 0)))
+    candidates.sort(key=lambda s: int(s.get("timestamp") or 0))
 
     synced_count = 0
-    for sub in candidates:
+    for i, sub in enumerate(candidates):
         try:
-            if _attempt_sync(lc, gh, state, sub):
+            if _attempt_sync(lc, gh, state, sub, escalate_threshold):
                 synced_count += 1
+                if i < len(candidates) - 1:
+                    # Be polite to GitHub's API when committing several
+                    # solutions in one run (e.g. catching up after a gap).
+                    time.sleep(commit_delay)
         except Exception:  # noqa: BLE001
-            logger.exception("Failed to sync submission %s (%s); will retry next poll",
+            logger.exception("Failed to sync submission %s (%s); will retry next run",
                               sub["id"], sub.get("title"))
 
     if synced_count:
-        gh.update_readme(state.all_synced())
+        gh.update_readme(state.all_problems())
 
     return synced_count
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--once", action="store_true", help="Run a single sync pass and exit")
-    args = parser.parse_args()
+    try:
+        settings = load_settings()
+    except RuntimeError as exc:
+        logger.critical(str(exc))
+        sys.exit(1)
 
-    settings = load_settings()
-    lc = LeetCodeClient(settings.leetcode_session, settings.leetcode_csrf_token,
-                         settings.leetcode_username)
-    gh = GitHubSync(settings.github_token, settings.github_repo, settings.github_branch,
-                     settings.commit_author_name, settings.commit_author_email)
-    state = SyncState()
+    try:
+        lc = LeetCodeClient(settings.leetcode_session, settings.leetcode_csrf_token,
+                             settings.leetcode_username)
+        gh = GitHubSync(settings.github_token, settings.github_repo, settings.github_branch)
+        state = SyncState()
 
-    if args.once:
-        run_once(lc, gh, state, settings.submission_fetch_limit)
-        return
+        logger.info("Starting sync pass for user '%s' -> repo '%s'",
+                    settings.leetcode_username, settings.github_repo)
 
-    logger.info("Starting poll loop (every %ds) for user '%s' -> repo '%s'",
-                settings.poll_interval_seconds, settings.leetcode_username, settings.github_repo)
-    while True:
-        try:
-            run_once(lc, gh, state, settings.submission_fetch_limit)
-        except Exception:  # noqa: BLE001
-            logger.exception("Unexpected error during sync pass; continuing")
-        time.sleep(settings.poll_interval_seconds)
+        synced = run_once(
+            lc, gh, state,
+            fetch_limit=settings.submission_fetch_limit,
+            commit_delay=settings.commit_delay_seconds,
+            escalate_threshold=settings.pending_escalate_threshold,
+        )
+        logger.info("Pass complete. Synced %d submission(s) this run.", synced)
+
+    except Exception:  # noqa: BLE001
+        # Anything that escapes here is unrecoverable for this run (expired
+        # auth after transport retries, GitHub permission errors, etc.) —
+        # fail loudly so the Actions run shows red instead of a silent no-op.
+        logger.critical("Sync run failed with an unrecoverable error:", exc_info=True)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

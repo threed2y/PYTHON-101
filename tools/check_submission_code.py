@@ -1,26 +1,18 @@
 """
-Diagnostic #3: dumps the raw submissionDetails response for one specific
-submission ID, so we can see exactly what LeetCode returns (or doesn't) for
-that submission -- useful when the code field comes back empty for certain
-problem types.
+Diagnostic: dumps the raw submissionDetails response for one submission ID
+(using the same retry-on-empty-code logic main.py uses), so you can see
+exactly what LeetCode returns for a specific submission. Run via the
+maintenance.yml workflow, passing the ID as a workflow input.
 
 Usage:
     python tools/check_submission_code.py <submission_id>
-
-Get the submission_id from tools/check_recent.py's output (the "id" field
-for the submission you care about).
 """
 import json
 import os
 import sys
 from pathlib import Path
 
-SYNC_DIR = Path(__file__).parent.parent / "sync"
-sys.path.insert(0, str(SYNC_DIR))
-
-from dotenv import load_dotenv
-load_dotenv(SYNC_DIR / ".env")
-
+sys.path.insert(0, str(Path(__file__).parent.parent / "sync"))
 from leetcode_client import LeetCodeClient  # noqa: E402
 
 
@@ -31,7 +23,7 @@ def _require(name: str) -> str:
     return value
 
 
-if len(sys.argv) != 2:
+if len(sys.argv) != 2 or not sys.argv[1].strip():
     sys.exit("Usage: python check_submission_code.py <submission_id>")
 
 client = LeetCodeClient(
@@ -39,5 +31,5 @@ client = LeetCodeClient(
     _require("LEETCODE_CSRF_TOKEN"),
     _require("LEETCODE_USERNAME"),
 )
-details = client.get_submission_details(sys.argv[1])
+details = client.get_submission_details_with_code(sys.argv[1].strip(), max_attempts=5, base_delay=3.0)
 print(json.dumps(details, indent=2))

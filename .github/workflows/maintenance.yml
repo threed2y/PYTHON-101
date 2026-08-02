@@ -1,0 +1,83 @@
+name: LeetCode Sync — Maintenance
+
+# Manual-only. One entry point for every diagnostic + repair tool, so there's
+# a single place to look instead of several one-off workflows.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tool:
+        description: "What to run"
+        required: true
+        type: choice
+        options:
+          - check_recent
+          - check_profile
+          - check_submission_code
+          - repair_broken_solutions
+        default: check_recent
+      submission_id:
+        description: "Submission ID (only used by check_submission_code)"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  maintenance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: sync/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r sync/requirements.txt
+
+      - name: Run selected tool
+        env:
+          LEETCODE_SESSION: ${{ secrets.LEETCODE_SESSION }}
+          LEETCODE_CSRF_TOKEN: ${{ secrets.LEETCODE_CSRF_TOKEN }}
+          LEETCODE_USERNAME: ${{ secrets.LEETCODE_USERNAME }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          case "${{ github.event.inputs.tool }}" in
+            check_recent)
+              python tools/check_recent.py
+              ;;
+            check_profile)
+              python tools/check_profile.py
+              ;;
+            check_submission_code)
+              if [ -z "${{ github.event.inputs.submission_id }}" ]; then
+                echo "submission_id input is required for check_submission_code" >&2
+                exit 1
+              fi
+              python tools/check_submission_code.py "${{ github.event.inputs.submission_id }}"
+              ;;
+            repair_broken_solutions)
+              python tools/repair_broken_solutions.py
+              ;;
+            *)
+              echo "Unknown tool: ${{ github.event.inputs.tool }}" >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Persist sync state (repair only)
+        if: ${{ github.event.inputs.tool == 'repair_broken_solutions' }}
+        run: |
+          git config user.name "leetcode-sync-bot"
+          git config user.email "actions@users.noreply.github.com"
+          if ! git diff --quiet -- sync/sync_state.json; then
+            git add sync/sync_state.json
+            git commit -m "chore: update sync state after repair"
+            git pull --rebase && git push
+          else
+            echo "No state changes to commit."
+          fi

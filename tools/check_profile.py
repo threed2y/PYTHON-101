@@ -1,38 +1,16 @@
 """
-Diagnostic #2: checks whether LEETCODE_USERNAME resolves to a real profile
-and shows total solved counts via matchedUser/submitStatsGlobal — a query
-path that's independent of recentAcSubmissionList. Useful for telling apart
-"wrong username" from "privacy setting hides recent submissions".
+Diagnostic: checks whether LEETCODE_USERNAME resolves to a real profile and
+shows total solved counts — independent of recentAcSubmissionList. Useful
+for telling apart "wrong username" from "privacy setting hides recent
+submissions". Run via the maintenance.yml workflow.
 """
 import json
 import os
 import sys
 from pathlib import Path
 
-SYNC_DIR = Path(__file__).parent.parent / "sync"
-sys.path.insert(0, str(SYNC_DIR))
-
-from dotenv import load_dotenv
-load_dotenv(SYNC_DIR / ".env")
-
+sys.path.insert(0, str(Path(__file__).parent.parent / "sync"))
 from leetcode_client import LeetCodeClient  # noqa: E402
-
-QUERY = """
-query userProfile($username: String!) {
-  matchedUser(username: $username) {
-    username
-    profile {
-      realName
-    }
-    submitStats: submitStatsGlobal {
-      acSubmissionNum {
-        difficulty
-        count
-      }
-    }
-  }
-}
-"""
 
 
 def _require(name: str) -> str:
@@ -47,5 +25,8 @@ client = LeetCodeClient(
     _require("LEETCODE_CSRF_TOKEN"),
     _require("LEETCODE_USERNAME"),
 )
-data = client._post(QUERY, {"username": client.username})
-print(json.dumps(data, indent=2))
+profile = client.get_user_profile()
+if not profile:
+    print(json.dumps({"matchedUser": None, "note": "Username did not resolve — check LEETCODE_USERNAME"}, indent=2))
+else:
+    print(json.dumps(profile, indent=2))

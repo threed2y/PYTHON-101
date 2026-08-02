@@ -1,21 +1,17 @@
 name: LeetCode Sync
 
-# This workflow assumes the sync tool lives in a `sync/` folder inside the
-# SAME repo you want solutions committed to (see README "GitHub Actions setup").
-# That lets it use the run's built-in GITHUB_TOKEN instead of a personal PAT.
-
 on:
   schedule:
     # Every 15 minutes. GitHub does not guarantee exact timing for schedule
     # triggers (low-traffic repos can see delays of several minutes to ~1hr),
-    # so this is "near real-time", not truly instant like a persistent poller.
+    # so this is "near real-time", not truly instant.
     - cron: "*/15 * * * *"
   workflow_dispatch: {}
 
 permissions:
   contents: write
 
-# Prevents two runs from racing on sync_state.json if one is still finishing.
+# Serializes runs so two overlapping schedules never race on sync_state.json.
 concurrency:
   group: leetcode-sync
   cancel-in-progress: false
@@ -39,22 +35,30 @@ jobs:
       - name: Install dependencies
         run: pip install -r sync/requirements.txt
 
-      - name: Run sync (single pass)
+      - name: Run sync
         env:
           LEETCODE_SESSION: ${{ secrets.LEETCODE_SESSION }}
           LEETCODE_CSRF_TOKEN: ${{ secrets.LEETCODE_CSRF_TOKEN }}
           LEETCODE_USERNAME: ${{ secrets.LEETCODE_USERNAME }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: python sync/main.py --once
+        run: python sync/main.py
 
       - name: Persist sync state
+        if: always()
         run: |
           git config user.name "leetcode-sync-bot"
           git config user.email "actions@users.noreply.github.com"
           if ! git diff --quiet -- sync/sync_state.json; then
             git add sync/sync_state.json
             git commit -m "chore: update sync state"
-            git push
+            # Conflict-safe: rebase onto any commits that landed while this
+            # run was in progress, then push. Retries a few times in the
+            # unlikely case of a second near-simultaneous push.
+            for i in 1 2 3; do
+              git pull --rebase && git push && break
+              echo "Push attempt $i failed, retrying..."
+              sleep 5
+            done
           else
             echo "No state changes to commit."
           fi

@@ -1,8 +1,8 @@
 """
 Thin client around LeetCode's (undocumented) GraphQL API.
 
-Uses your logged-in session cookie so it can pull full submission source code,
-which the public recentAcSubmissionList endpoint alone does not expose.
+Uses your logged-in session cookie so it can pull full submission source
+code, which the public recentAcSubmissionList endpoint alone does not expose.
 """
 import logging
 import time
@@ -54,7 +54,22 @@ query questionData($titleSlug: String!) {
 }
 """
 
-# LeetCode lang name -> file extension
+USER_PROFILE_QUERY = """
+query userProfile($username: String!) {
+  matchedUser(username: $username) {
+    username
+    submitStats: submitStatsGlobal {
+      acSubmissionNum {
+        difficulty
+        count
+      }
+    }
+  }
+}
+"""
+
+# LeetCode lang slug -> file extension. Unknown/new slugs fall back to .txt
+# rather than raising, so a LeetCode-side addition never breaks a run.
 LANG_EXTENSIONS = {
     "python": "py",
     "python3": "py",
@@ -95,7 +110,7 @@ class LeetCodeClient:
                 "Content-Type": "application/json",
                 "Referer": "https://leetcode.com",
                 "x-csrftoken": csrf_token,
-                "User-Agent": "leetcode-github-sync/1.0",
+                "User-Agent": "leetcode-github-sync/2.0",
             }
         )
 
@@ -106,28 +121,38 @@ class LeetCodeClient:
                 resp = self.session.post(
                     GRAPHQL_URL, json={"query": query, "variables": variables}, timeout=15
                 )
+                if resp.status_code == 429:
+                    retry_after = float(resp.headers.get("Retry-After", 2 ** attempt))
+                    logger.warning("Rate limited by LeetCode (429). Waiting %.0fs.", retry_after)
+                    time.sleep(retry_after)
+                    continue
                 resp.raise_for_status()
                 payload = resp.json()
                 if "errors" in payload and payload["errors"]:
                     raise RuntimeError(f"GraphQL errors: {payload['errors']}")
-                return payload["data"]
+                return payload.get("data") or {}
             except Exception as exc:  # noqa: BLE001
                 last_exc = exc
                 wait = 2 ** attempt
-                logger.warning("LeetCode API call failed (attempt %d/%d): %s. Retrying in %ds",
-                                attempt, retries, exc, wait)
+                logger.warning(
+                    "LeetCode API call failed (attempt %d/%d): %s. Retrying in %ds",
+                    attempt, retries, exc, wait,
+                )
                 time.sleep(wait)
-        raise RuntimeError(f"LeetCode API call failed after {retries} attempts") from last_exc
+        raise RuntimeError(
+            f"LeetCode API call failed after {retries} attempts. "
+            f"Most likely cause: LEETCODE_SESSION/LEETCODE_CSRF_TOKEN expired."
+        ) from last_exc
 
     def get_recent_ac_submissions(self, limit: int) -> list[dict[str, Any]]:
         data = self._post(RECENT_AC_QUERY, {"username": self.username, "limit": limit})
         return data.get("recentAcSubmissionList", []) or []
 
-    def get_submission_details(self, submission_id: int) -> dict[str, Any]:
+    def get_submission_details(self, submission_id: Any) -> dict[str, Any]:
         data = self._post(SUBMISSION_DETAILS_QUERY, {"submissionId": int(submission_id)})
         return data.get("submissionDetails", {}) or {}
 
-    def get_submission_details_with_code(self, submission_id: int, max_attempts: int = 4,
+    def get_submission_details_with_code(self, submission_id: Any, max_attempts: int = 4,
                                           base_delay: float = 3.0) -> dict[str, Any]:
         """Like get_submission_details, but retries with backoff if `code`
         comes back empty. LeetCode's write path (especially for database/SQL
@@ -155,6 +180,14 @@ class LeetCodeClient:
         data = self._post(QUESTION_DATA_QUERY, {"titleSlug": title_slug})
         return data.get("question", {}) or {}
 
+    def get_user_profile(self) -> dict[str, Any]:
+        data = self._post(USER_PROFILE_QUERY, {"username": self.username})
+        return data.get("matchedUser") or {}
+
     @staticmethod
     def extension_for_lang(lang_slug: str) -> str:
-        return LANG_EXTENSIONS.get(lang_slug.lower(), "txt")
+        ext = LANG_EXTENSIONS.get((lang_slug or "").lower())
+        if ext is None:
+            logger.warning("Unknown LeetCode language slug '%s'; defaulting to .txt", lang_slug)
+            return "txt"
+        return ext
